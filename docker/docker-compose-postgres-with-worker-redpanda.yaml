@@ -1,0 +1,136 @@
+version: '2.3'
+
+services:
+  conductor-server:
+    environment:
+      - CONFIG_PROP=config-postgres.properties
+    image: conductor:server
+    container_name: conductor-server
+    build:
+      context: ../
+      dockerfile: docker/server/Dockerfile
+      args:
+        YARN_OPTS: ${YARN_OPTS}
+    networks:
+      - internal
+    ports:
+      - 8080:8080
+      - 8127:5000
+    healthcheck:
+      test: [ "CMD", "curl","-I" ,"-XGET", "http://localhost:8080/health" ]
+      interval: 10s
+      timeout: 30s
+      retries: 12
+    links:
+      - conductor-postgres:postgresdb
+    depends_on:
+      conductor-postgres:
+        condition: service_healthy
+      redpanda-0:
+        condition: service_started
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1k"
+        max-file: "3"
+
+  conductor-postgres:
+    image: postgres
+    environment:
+      - POSTGRES_USER=conductor
+      - POSTGRES_PASSWORD=conductor
+    volumes:
+      - pgdata-conductor:/var/lib/postgresql/data
+    networks:
+      - internal
+    ports:
+      - 6432:5432
+    healthcheck:
+      test: timeout 5 bash -c 'cat < /dev/null > /dev/tcp/localhost/5432'
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1k"
+        max-file: "3"
+
+  redpanda-0:
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      # Address the broker advertises to clients that connect to the Kafka API.
+      # Use the internal addresses to connect to the Redpanda brokers'
+      # from inside the same Docker network.
+      # Use the external addresses to connect to the Redpanda brokers'
+      # from outside the Docker network.
+      - --advertise-kafka-addr internal://redpanda-0:9092,external://localhost:19092
+      - --pandaproxy-addr internal://0.0.0.0:8082,external://0.0.0.0:18082
+      # Address the broker advertises to clients that connect to the HTTP Proxy.
+      - --advertise-pandaproxy-addr internal://redpanda-0:8082,external://localhost:18082
+      - --schema-registry-addr internal://0.0.0.0:8081,external://0.0.0.0:18081
+      # Redpanda brokers use the RPC API to communicate with each other internally.
+      - --rpc-addr redpanda-0:33145
+      - --advertise-rpc-addr redpanda-0:33145
+      # Mode dev-container uses well-known configuration properties for development in containers.
+      - --mode dev-container
+      # Tells Seastar (the framework Redpanda uses under the hood) to use 1 core on the system.
+      - --smp 1
+      - --default-log-level=info
+    image: docker.redpanda.com/redpandadata/redpanda:v25.2.8
+    container_name: redpanda-0
+    volumes:
+      - redpanda-0:/var/lib/redpanda/data
+    networks:
+      - internal
+    ports:
+      - 18081:18081
+      - 18082:18082
+      - 19092:19092
+      - 19644:9644
+  console:
+    container_name: redpanda-console
+    image: docker.redpanda.com/redpandadata/console:v3.2.2
+    networks:
+      - internal
+    entrypoint: /bin/sh
+    command: -c 'echo "$$CONSOLE_CONFIG_FILE" > /tmp/config.yml; /app/console'
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["redpanda-0:9092"]
+        schemaRegistry:
+          enabled: true
+          urls: ["http://redpanda-0:8081"]
+        redpanda:
+          adminApi:
+            enabled: true
+            urls: ["http://redpanda-0:9644"]
+    ports:
+      - 8082:8080
+    depends_on:
+      - redpanda-0
+
+  conductor-worker:
+    image: conductor-worker
+    networks:
+      - internal
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "1k"
+        max-file: "3"
+    depends_on:
+      conductor-server:
+        condition: service_healthy
+
+volumes:
+  pgdata-conductor:
+    driver: local
+  redpanda-0: null
+networks:
+  internal:
+    driver: bridge

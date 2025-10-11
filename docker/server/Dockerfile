@@ -50,9 +50,7 @@ FROM alpine:3.19
 
 LABEL maintainer="Orkes OSS <oss@orkes.io>"
 
-RUN apk add openjdk17
-RUN apk add nginx
-RUN apk add curl
+RUN apk add --no-cache openjdk17-jre nginx curl
 
 # Make app folders
 RUN mkdir -p /app/config /app/logs /app/libs
