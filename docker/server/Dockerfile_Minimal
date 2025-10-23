@@ -1,0 +1,115 @@
+#
+# conductor:server-minimal - Minimal Conductor Server Build
+#
+# Components included:
+# - Core + REST API + gRPC
+# - PostgreSQL persistence (with distributed locking)
+# - Kafka event queue
+# - System tasks (HTTP, JSON-JQ, Kafka)
+# - Metrics (Prometheus)
+#
+# Components excluded:
+# - UI (React app, Nginx)
+# - Elasticsearch/OpenSearch
+# - Redis (lock, concurrency, persistence)
+# - External storage (S3, Azure)
+# - Other event queues (SQS, AMQP, NATS)
+# - Cassandra, MySQL, SQLite persistence
+#
+# ===========================================================================================================
+# 0. Builder stage - Optimized for Docker layer caching
+# ===========================================================================================================
+FROM openjdk:17-bullseye AS builder
+
+LABEL maintainer="Orkes OSS <oss@orkes.io>"
+
+WORKDIR /conductor
+
+# Step 1: Copy Gradle wrapper and configuration files first (changes rarely)
+# This layer will be cached unless these files change
+COPY gradlew gradlew.bat ./
+COPY gradle/ gradle/
+COPY settings.gradle build.gradle dependencies.gradle ./
+
+# Step 2: Copy only build.gradle files for all modules (for dependency resolution)
+# This allows Gradle to download dependencies before source code changes
+COPY */build.gradle ./dummy/
+COPY annotations/build.gradle annotations/
+COPY annotations-processor/build.gradle annotations-processor/
+COPY common/build.gradle common/
+COPY common-persistence/build.gradle common-persistence/
+COPY core/build.gradle core/
+COPY rest/build.gradle rest/
+COPY grpc/build.gradle grpc/
+COPY grpc-server/build.gradle grpc-server/
+COPY postgres-persistence/build.gradle postgres-persistence/
+COPY kafka-event-queue/build.gradle kafka-event-queue/
+COPY http-task/build.gradle http-task/
+COPY json-jq-task/build.gradle json-jq-task/
+COPY kafka/build.gradle kafka/
+COPY metrics/build.gradle metrics/
+COPY workflow-event-listener/build.gradle workflow-event-listener/
+COPY server-minimal/build.gradle server-minimal/
+
+# Step 3: Copy all source code
+COPY . .
+
+# Step 4: Add server-minimal to settings.gradle dynamically (AFTER copying source)
+RUN sed -i "/include 'server-lite'/a include 'server-minimal'" settings.gradle && \
+    echo "Updated settings.gradle with server-minimal module" && \
+    echo "Verifying settings.gradle:" && \
+    grep "server" settings.gradle
+
+# Step 5: Download dependencies (this layer is cached if build.gradle files don't change)
+# Using --refresh-dependencies only on first build, then cached
+RUN ./gradlew :conductor-server-minimal:dependencies --no-daemon || true
+
+# Step 6: Build only the server-minimal module (uses cached dependencies)
+RUN ./gradlew :conductor-server-minimal:build -x test --no-daemon --build-cache
+
+# Verify the JAR was created
+RUN ls -lh /conductor/server-minimal/build/libs/ && \
+    echo "Build artifacts:" && \
+    find /conductor/server-minimal/build/libs -name "*minimal*.jar"
+
+
+# ===========================================================================================================
+# 1. Runtime stage
+# ===========================================================================================================
+FROM alpine:3.19
+
+LABEL maintainer="Orkes OSS <oss@orkes.io>"
+LABEL description="Minimal Conductor OSS server with PostgreSQL, Kafka, no UI"
+
+# Install only Java runtime and curl (no Nginx needed)
+RUN apk add --no-cache openjdk17-jre curl
+
+# Make app folders
+RUN mkdir -p /app/config /app/logs /app/libs
+
+# Copy the compiled Spring Boot JAR (executable)
+COPY --from=builder /conductor/server-minimal/build/libs/*-boot.jar /app/libs/conductor-server.jar
+
+# Copy startup scripts and config
+COPY docker/server/bin /app
+COPY docker/server/config /app/config
+
+# Make startup script executable
+RUN chmod +x /app/startup-minimal.sh
+
+# Expose ports
+# 8080: REST API
+# 8090: gRPC (if using gRPC client)
+EXPOSE 8080 8090
+
+# Health check
+HEALTHCHECK --interval=60s --timeout=30s --retries=10 CMD curl -f http://localhost:8080/health || exit 1
+
+# Set working directory
+WORKDIR /app
+
+# Default to minimal config if CONFIG_PROP not specified
+ENV CONFIG_PROP=config-minimal.properties
+
+CMD [ "/app/startup-minimal.sh" ]
+ENTRYPOINT [ "/bin/sh"]
