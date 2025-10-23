@@ -114,18 +114,18 @@ services:
     depends_on:
       - redpanda-0
 
-  conductor-worker:
-    image: conductor-worker
-    networks:
-      - internal
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "1k"
-        max-file: "3"
-    depends_on:
-      conductor-server:
-        condition: service_healthy
+  # conductor-worker:
+  #   image: conductor-worker
+  #   networks:
+  #     - internal
+  #   logging:
+  #     driver: "json-file"
+  #     options:
+  #       max-size: "1k"
+  #       max-file: "3"
+  #   depends_on:
+  #     conductor-server:
+  #       condition: service_healthy
 
 volumes:
   pgdata-conductor:
